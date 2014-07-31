@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include "script.h"
 #include "http_parser.h"
 
@@ -59,6 +60,13 @@ void script_headers(lua_State *L, char **headers) {
     lua_pop(L, 2);
 }
 
+static int script_timeofday(lua_State *L) {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    lua_pushinteger(L, ((t.tv_sec * 1000000) + t.tv_usec));
+    return 1;
+}
+
 void script_init(lua_State *L, char *script, int argc, char **argv) {
     if (script && luaL_dofile(L, script)) {
         const char *cause = lua_tostring(L, -1);
@@ -72,6 +80,9 @@ void script_init(lua_State *L, char *script, int argc, char **argv) {
         lua_rawseti(L, 2, i);
     }
     lua_call(L, 1, 0);
+
+    lua_pushcfunction(L, script_timeofday);
+    lua_setglobal(L, "timeofday");
 }
 
 void script_request(lua_State *L, char **buf, size_t *len) {
