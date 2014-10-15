@@ -14,6 +14,7 @@ static struct config {
     bool     latency;
     bool     dynamic;
     char    *script;
+    FILE    *latencies;
     SSL_CTX *ctx;
 } cfg;
 
@@ -51,6 +52,7 @@ static void usage() {
            "    -r, --rate        <N>  Request rate               \n"
            "                                                      \n"
            "    -s, --script      <S>  Load Lua script file       \n"
+           "    -o, --output      <S>  Latencies output file      \n"
            "    -H, --header      <H>  Add header to request      \n"
            "        --latency          Print latency statistics   \n"
            "        --timeout     <T>  Socket/request timeout     \n"
@@ -194,6 +196,10 @@ int main(int argc, char **argv) {
         errors.write   += t->errors.write;
         errors.timeout += t->errors.timeout;
         errors.status  += t->errors.status;
+    }
+
+    if (cfg.latencies) {
+        fclose(cfg.latencies);
     }
 
     uint64_t runtime_us = time_us() - start;
@@ -435,12 +441,12 @@ static int response_complete(http_parser *parser) {
     }
 
     if (--c->pending == 0) {
-        // Latency is in us I think
-        uint64_t elapsed_ms = (now - statistics.start_time)/1000;
         uint64_t latency_us = now - c->start;
-        //if (latency > 5000) {
-        //    printf("%llu, %llu\n", elapsed, latency);
-        //}
+       
+        if (cfg.latencies) { 
+            uint64_t elapsed_ms = (now - statistics.start_time)/1000;
+            fprintf(cfg.latencies, "%llu, %llu\n", elapsed_ms, latency_us/1000);
+        }
 
         int delay_ms = cfg.request_interval - latency_us/1000;
         if (delay_ms <= 0) {
@@ -575,6 +581,7 @@ static struct option longopts[] = {
     { "duration",    required_argument, NULL, 'd' },
     { "threads",     required_argument, NULL, 't' },
     { "rate",        required_argument, NULL, 'r' },
+    { "output",      required_argument, NULL, 'o' },
     { "script",      required_argument, NULL, 's' },
     { "header",      required_argument, NULL, 'H' },
     { "latency",     no_argument,       NULL, 'L' },
@@ -593,8 +600,9 @@ static int parse_args(struct config *cfg, char **url, char **headers, int argc, 
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
     int rate_arg     = 0;
+    char *latencies_file = NULL;
 
-    while ((c = getopt_long(argc, argv, "t:c:r:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:r:o:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
@@ -604,6 +612,9 @@ static int parse_args(struct config *cfg, char **url, char **headers, int argc, 
                 break;
             case 'r':
                 if (scan_metric(optarg, &rate_arg)) return -1;
+                break;
+            case 'o':
+                latencies_file = optarg;
                 break;
             case 'd':
                 if (scan_time(optarg, &cfg->duration)) return -1;
@@ -643,6 +654,14 @@ static int parse_args(struct config *cfg, char **url, char **headers, int argc, 
     if (rate_arg) {
         double per_connection_rate = (double)rate_arg/(double)cfg->connections;
         cfg->request_interval = (uint64_t)1000.0/per_connection_rate;        
+    }
+
+    if (latencies_file) {
+        cfg->latencies = fopen(latencies_file, "w");
+        if (cfg->latencies == NULL) {
+            printf("unable to open latency file.");
+            exit(1);
+        }
     }
 
     *url    = argv[optind];
