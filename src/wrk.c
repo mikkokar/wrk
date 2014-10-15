@@ -7,6 +7,7 @@ static struct config {
     struct addrinfo addr;
     uint64_t threads;
     uint64_t connections;
+    uint64_t request_interval;
     uint64_t duration;
     uint64_t timeout;
     uint64_t pipeline;
@@ -20,6 +21,7 @@ static struct {
     stats *latency;
     stats *requests;
     pthread_mutex_t mutex;
+    uint64_t start_time;
 } statistics;
 
 static struct sock sock = {
@@ -46,6 +48,7 @@ static void usage() {
            "    -c, --connections <N>  Connections to keep open   \n"
            "    -d, --duration    <T>  Duration of test           \n"
            "    -t, --threads     <N>  Number of threads to use   \n"
+           "    -r, --rate        <N>  Request rate               \n"
            "                                                      \n"
            "    -s, --script      <S>  Load Lua script file       \n"
            "    -H, --header      <H>  Add header to request      \n"
@@ -130,6 +133,7 @@ int main(int argc, char **argv) {
     pthread_mutex_init(&statistics.mutex, NULL);
     statistics.latency  = stats_alloc(SAMPLES);
     statistics.requests = stats_alloc(SAMPLES);
+    statistics.start_time = time_us();
 
     thread *threads = zcalloc(cfg.threads * sizeof(thread));
     uint64_t connections = cfg.connections / cfg.threads;
@@ -398,6 +402,14 @@ static int response_body(http_parser *parser, const char *at, size_t len) {
     return 0;
 }
 
+static int introduce_delay(aeEventLoop *loop, long long id, void *data) {
+    connection *c = data;
+    thread *thread = c->thread;
+
+    aeCreateFileEvent(loop, c->fd, AE_WRITABLE, socket_writeable, c);
+    return AE_NOMORE;
+}
+
 static int response_complete(http_parser *parser) {
     connection *c = parser->data;
     thread *thread = c->thread;
@@ -423,8 +435,27 @@ static int response_complete(http_parser *parser) {
     }
 
     if (--c->pending == 0) {
+        // Latency is in us I think
+        uint64_t elapsed_ms = (now - statistics.start_time)/1000;
+        uint64_t latency_us = now - c->start;
+        //if (latency > 5000) {
+        //    printf("%llu, %llu\n", elapsed, latency);
+        //}
+
+        int delay_ms = cfg.request_interval - latency_us/1000;
+        if (delay_ms <= 0) {
+            delay_ms = 0;
+        }
+
+        //printf("Delay ms: %d\n", delay);
+
         stats_record(thread->latency, now - c->start);
-        aeCreateFileEvent(thread->loop, c->fd, AE_WRITABLE, socket_writeable, c);
+        
+	if (delay_ms > 0) {
+            aeCreateTimeEvent(thread->loop, delay_ms, introduce_delay, c, NULL);
+        } else {
+            aeCreateFileEvent(thread->loop, c->fd, AE_WRITABLE, socket_writeable, c);
+        }
     }
 
     if (!http_should_keep_alive(parser)) {
@@ -543,6 +574,7 @@ static struct option longopts[] = {
     { "connections", required_argument, NULL, 'c' },
     { "duration",    required_argument, NULL, 'd' },
     { "threads",     required_argument, NULL, 't' },
+    { "rate",        required_argument, NULL, 'r' },
     { "script",      required_argument, NULL, 's' },
     { "header",      required_argument, NULL, 'H' },
     { "latency",     no_argument,       NULL, 'L' },
@@ -560,14 +592,18 @@ static int parse_args(struct config *cfg, char **url, char **headers, int argc, 
     cfg->connections = 10;
     cfg->duration    = 10;
     cfg->timeout     = SOCKET_TIMEOUT_MS;
+    int rate_arg     = 0;
 
-    while ((c = getopt_long(argc, argv, "t:c:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "t:c:r:d:s:H:T:Lrv?", longopts, NULL)) != -1) {
         switch (c) {
             case 't':
                 if (scan_metric(optarg, &cfg->threads)) return -1;
                 break;
             case 'c':
                 if (scan_metric(optarg, &cfg->connections)) return -1;
+                break;
+            case 'r':
+                if (scan_metric(optarg, &rate_arg)) return -1;
                 break;
             case 'd':
                 if (scan_time(optarg, &cfg->duration)) return -1;
@@ -602,6 +638,11 @@ static int parse_args(struct config *cfg, char **url, char **headers, int argc, 
     if (!cfg->connections || cfg->connections < cfg->threads) {
         fprintf(stderr, "number of connections must be >= threads\n");
         return -1;
+    }
+
+    if (rate_arg) {
+        double per_connection_rate = (double)rate_arg/(double)cfg->connections;
+        cfg->request_interval = (uint64_t)1000.0/per_connection_rate;        
     }
 
     *url    = argv[optind];
